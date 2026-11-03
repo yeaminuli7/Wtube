@@ -1,0 +1,86 @@
+name: Build and Release APK
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apk-release
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Read version from mytube-web/VERSION
+        id: v
+        run: |
+          set -e
+          VC="$(awk 'NR==1{print $1}' mytube-web/VERSION)"
+          VN="$(awk 'NR==1{print $2}' mytube-web/VERSION)"
+          if [ -z "$VC" ] || [ -z "$VN" ]; then
+            echo "mytube-web/VERSION must contain: <versionCode> <versionName>" >&2
+            exit 1
+          fi
+          echo "code=$VC" >> "$GITHUB_OUTPUT"
+          echo "name=$VN" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VN" >> "$GITHUB_OUTPUT"
+          echo "Building versionCode $VC / versionName $VN (tag v$VN)"
+
+      - name: Make build script executable
+        run: chmod +x mytube-web/tools/build-offline.sh
+
+      - name: Build signed APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          cd mytube-web
+          bash tools/build-offline.sh "${{ steps.v.outputs.code }}" "${{ steps.v.outputs.name }}"
+
+      - name: Verify APK production
+        run: |
+          set -e
+          APK="mytube-web/apk/Wtube_v${{ steps.v.outputs.name }}.apk"
+          test -f "$APK" || { echo "APK file not generated!" >&2; exit 1; }
+          ls -lh "$APK"
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.v.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Wtube v${{ steps.v.outputs.name }}
+          body: |
+            ## Wtube APK Release
+            **Version:** ${{ steps.v.outputs.name }} (versionCode: ${{ steps.v.outputs.code }})
+            
+            - Built automatically from commit `${{ github.sha }}`.
+          files: mytube-web/apk/Wtube_v${{ steps.v.outputs.name }}.apk
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          

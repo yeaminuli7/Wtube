@@ -1,0 +1,146 @@
+name: Build and release APK
+
+# Builds a signed, installable APK with the project's own offline toolchain
+# (no Gradle, no Android SDK download from dl.google.com) and attaches it to a
+# single GitHub release. That release is the only one this workflow maintains:
+# older releases are pruned so the Releases page always shows exactly one.
+#
+# The version comes from mytube-web/VERSION  ->  "<versionCode> <versionName>"
+
+on:
+  push:
+    branches:
+      - arena/72be64be-vr
+    paths:
+      - 'mytube-web/src/**'
+      - 'mytube-web/assets/**'
+      - 'mytube-web/res/**'
+      - 'mytube-web/tools/**'
+      - 'mytube-web/libs/**'
+      - 'mytube-web/AndroidManifest.xml'
+      - 'mytube-web/debug.keystore'
+      - 'mytube-web/VERSION'
+      - '.github/workflows/build-apk.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  # one build at a time; a newer push cancels a run still in progress
+  group: apk-release
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node (toolchain comes from npm)
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Read version
+        id: v
+        run: |
+          set -e
+          VC="$(awk 'NR==1{print $1}' mytube-web/VERSION)"
+          VN="$(awk 'NR==1{print $2}' mytube-web/VERSION)"
+          if [ -z "$VC" ] || [ -z "$VN" ]; then
+            echo "mytube-web/VERSION must contain: <versionCode> <versionName>" >&2
+            exit 1
+          fi
+          echo "code=$VC"  >> "$GITHUB_OUTPUT"
+          echo "name=$VN"  >> "$GITHUB_OUTPUT"
+          echo "tag=v$VN"  >> "$GITHUB_OUTPUT"
+          echo "Building versionCode $VC / versionName $VN (tag v$VN)"
+
+      - name: Build signed APK
+        env:
+          # tools/ghfetch.py uses `gh api` to pull the media3/guava mirrors
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          cd mytube-web
+          bash tools/build-offline.sh "${{ steps.v.outputs.code }}" "${{ steps.v.outputs.name }}"
+
+      - name: Verify the APK
+        run: |
+          set -e
+          APK="mytube-web/apk/Wtube_v${{ steps.v.outputs.name }}.apk"
+          test -f "$APK" || { echo "APK was not produced" >&2; exit 1; }
+          ls -l "$APK"
+          # apksigner verify already ran inside the build script (set -e),
+          # so a failure there would have stopped the job.
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.v.outputs.tag }}
+          # CRITICAL: without this, the GitHub API creates the tag on the
+          # repository's DEFAULT branch, not on the commit that was built.
+          # The default branch here is `main`, which sits at the initial commit,
+          # so every release's "Source code (zip)" contained only README.md —
+          # zero .java files. Pinning to github.sha fixes that.
+          target_commitish: ${{ github.sha }}
+          name: Wtube v${{ steps.v.outputs.name }}
+          body: |
+            ## Download
+
+            **Wtube_v${{ steps.v.outputs.name }}.apk** is attached to this release — save it and install.
+
+            `versionCode ${{ steps.v.outputs.code }}` · built automatically by GitHub Actions
+            from commit `${{ github.sha }}`.
+
+            Same signing key as every earlier build, so it installs over the
+            previous version and keeps your settings.
+
+            ## Source code
+
+            GitHub attaches the full source to this release as
+            **Source code (zip)** and **Source code (tar.gz)**.
+
+            To build it yourself (no Gradle, no Android Studio):
+
+            ```sh
+            cd mytube-web
+            bash tools/build-offline.sh ${{ steps.v.outputs.code }} ${{ steps.v.outputs.name }}
+            ```
+
+            The version is read from `mytube-web/VERSION`; bump that file to
+            change the next build.
+          files: mytube-web/apk/Wtube_v${{ steps.v.outputs.name }}.apk
+          fail_on_unmatched_files: true
+
+      - name: Keep exactly one release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP: ${{ steps.v.outputs.tag }}
+        run: |
+          set -e
+          echo "Keeping $KEEP, removing any older releases"
+          gh api "repos/${{ github.repository }}/releases?per_page=100" \
+            --jq ".[] | select(.tag_name != \"$KEEP\") | .id" |
+          while read -r id; do
+            [ -n "$id" ] || continue
+            echo "  deleting release id $id"
+            gh api -X DELETE "repos/${{ github.repository }}/releases/$id" || true
+          done
+
+      - name: Upload APK as a build artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: Wtube_v${{ steps.v.outputs.name }}
+          path: mytube-web/apk/Wtube_v${{ steps.v.outputs.name }}.apk
+          retention-days: 14

@@ -1,3 +1,7 @@
+<!-- ABOUT THE PROJECT -->
+<a href="https://trendshift.io/repositories/3770" target="_blank"><img src="https://trendshift.io/api/badge/repositories/3770" alt="GreyDGL%2FPentestGPT | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+
+
 # Wtube
 
 **A YouTube app for Android with no account, no ads, and a download button that actually works.**
